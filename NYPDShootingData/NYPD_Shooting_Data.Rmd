@@ -1,0 +1,167 @@
+---
+title: "When to get shot in New York City"
+author: "Anonymous Student"
+date: "12/5/2021"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r imports, include=FALSE}
+require(tidyverse)
+require(lubridate)
+```
+
+## Importing and cleaning the shooting data
+
+I am converting NA values to be "UNKNOWN" in columns that have that as a value.
+
+```{r read_data}
+# retrieved Tue Dec  7 11:59:12 HST 2021
+url <- "https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD"
+
+shoot <- read_csv(url, show_col_types=FALSE) %>% 
+  select(-c("X_COORD_CD", "Y_COORD_CD", "Lon_Lat")) %>%
+  replace_na(list(PERP_AGE_GROUP="UNKNOWN", 
+                  PERP_SEX="U", PERP_RACE="UNKNOWN", LOCATION_DESC="NONE")) %>%
+  mutate(OCCUR_DATE = as.Date(OCCUR_DATE, format="%m/%d/%Y"),
+         BORO = factor(BORO),
+         PRECINCT = factor(PRECINCT),
+         LOCATION_DESC = factor(LOCATION_DESC),
+         PERP_AGE_GROUP = factor(PERP_AGE_GROUP),
+         PERP_SEX = factor(PERP_SEX),
+         PERP_RACE = factor(PERP_RACE),
+         VIC_AGE_GROUP = factor(VIC_AGE_GROUP),
+         VIC_SEX = factor(VIC_SEX),
+         VIC_RACE = factor(VIC_RACE),
+         MONTH_OF_YEAR = month(OCCUR_DATE),
+         MONTH_YEAR = format(as.Date(OCCUR_DATE), format = "%m/%Y")
+         )
+summary(shoot)
+```
+
+My first question was, when are people getting shot in New York City? What are the safest and least safe days of the week?
+```{r day_of_week}
+day_of_week <- shoot %>% mutate(DAY_OF_WEEK = factor(weekdays(as.Date(OCCUR_DATE)), ordered=TRUE, 
+                  levels=c("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")
+                  )) %>% 
+              select(DAY_OF_WEEK)
+
+avg_per_day <- dim(shoot)[1] / 7
+  
+day_of_week %>% plot() + abline(h=avg_per_day, col='red') 
+```
+
+Saturday and Sunday have significantly more shootings than other days. That seems to make sense. This led me to wonder about month of the year. Is there a seasonal aspect to shootings?
+
+```{r month_of_year}
+avg_per_month <- dim(shoot)[1] / 12
+
+moy_sum <- shoot %>% 
+  group_by(MONTH_OF_YEAR) %>% 
+  summarize(n())  
+
+moy_sum %>% 
+  plot(type="o", xlab="month of year", 
+       ylab="murders (2006-2020)") + abline(h=avg_per_month, col='red') 
+```
+It looks like there's a clear seasonal trend, with May through October are more dangerous than average. This made me wonder if it is correlated with temperature at all.
+```{r temperature_one}
+# data was manually copied from https://www.timeanddate.com/weather/usa/new-york/climate
+# retrieved Tue Dec  7 11:59:12 HST 2021
+avg_min_temp <- c(27, 28, 35, 45, 54, 64, 69, 68, 61, 50, 41, 33)
+
+plot(avg_min_temp, type="o", xlab="month of year", ylab="avg minimum temperature")
+
+moy_counts <- moy_sum[2]
+
+# adjust months by number of days, so they are a daily rate
+# I am fudging here on leap years a bit.
+month_lengths <- c(31,28.25,31,30,31,30,31,31,30,31,30,31)
+num_years <- 15
+
+daily_murders_by_month <- as.matrix(moy_counts / (month_lengths * num_years))
+
+linear_model <- lm(daily_murders_by_month ~ avg_min_temp)
+
+plot(avg_min_temp, daily_murders_by_month, 
+     xlab="average minimum temperature", 
+     ylab="average murders per day") + abline(linear_model)
+
+cor(daily_murders_by_month, avg_min_temp, method="pearson")
+
+```
+A correlation coefficient of .964 is quite high, indicating that monthly average minimum temperature alone can explain over 96% of the variance in the monthly murder count. That seems hard to believe, and merits further investigation. 
+
+For starters, I looked at average max temperatures (retrieved from the same source).
+```{r}
+# data was manually copied from https://www.timeanddate.com/weather/usa/new-york/climate
+# retrieved Tue Dec  7 11:59:12 HST 2021
+avg_max_temp <- c(40, 42, 50, 62, 72, 80, 85, 84, 76, 64, 54, 44)
+cor(daily_murders_by_month, avg_max_temp)
+```
+The correlation is not quite as high, but still incredibly strong.
+
+This led me to download the daily weather data from NOAA. I chose the Central 
+Park weather station for simplicity. In addition to min/max daily temperatures,
+I also got data on precipitation and wind speed (AWND).  approximately 200 days 
+were missing wind speed data, so I replaced it with the mean value.
+```{r}
+## data from https://www.ncdc.noaa.gov/
+
+weather <- read_csv("2845844.csv", show_col_types = FALSE) %>%
+  select(c("DATE", "AWND", "PRCP", "TMAX", "TMIN")) %>%
+  # replace ~200 missing "AWND" values with the mean
+  mutate(AWND = ifelse(is.na(AWND), mean(AWND, na.rm = T), AWND),
+        MONTH_YEAR = format(DATE, format = "%m/%Y"))
+
+summary(weather)
+```
+Now, we need to join together the daily weather and daily murder counts.
+
+```{r}
+by_day <- shoot %>% group_by(OCCUR_DATE) %>% summarize(murders=n())
+
+joined_by_day <- by_day %>% left_join(weather, by = c("OCCUR_DATE" = "DATE"))
+
+cor(joined_by_day$murders, joined_by_day$TMIN, method="pearson")
+cor(joined_by_day$murders, joined_by_day$TMAX, method="pearson")
+cor(joined_by_day$murders, joined_by_day$AWND, method="pearson")
+cor(joined_by_day$murders, joined_by_day$PRCP, method="pearson")
+```
+There is a moderate positive correlation between daily min/max temperatures and number of murders,
+and a negative correlation between average wind speed and number of murders. The correlation
+between daily temps and murders is much less than the one we found grouping by month because
+there are relatively few murders on a given day.
+
+This can be seen if we group the data by month + year instead of day:
+
+```{r}
+murders_by_month <- shoot %>% group_by(MONTH_YEAR) %>% summarize(murders=n())
+weather_by_month <- weather %>% group_by(MONTH_YEAR)  %>%
+                summarize(mean_tmin = mean(TMIN), mean_tmax = mean(TMAX),
+                          mean_awnd = mean(AWND), mean_prcp = mean(PRCP))
+joined_by_month <- murders_by_month %>% left_join(weather_by_month, by = c("MONTH_YEAR" = "MONTH_YEAR"))
+
+cor(joined_by_month$murders, joined_by_month$mean_tmin)
+cor(joined_by_month$murders, joined_by_month$mean_tmax)
+cor(joined_by_month$murders, joined_by_month$mean_awnd)
+cor(joined_by_month$murders, joined_by_month$mean_prcp)
+
+cor(joined_by_month$mean_tmin, joined_by_month$mean_awnd)
+```
+
+
+
+## Bias Identification
+I tried to pick a research question that would not involve my personal biases around age, race, location, guns, New York City, etc. So I believe the main source of bias here is the data itself. 
+
+I do not have information on the exact limitations of this data set. There could be under-reporting of shootings in particular places or at particular times, or duplicate data. The times are probably when the shootings were reported, rather than when they occurred. This may slightly affect the analysis of time of day (for instance, shootings at noon may get reported faster than shootings at midnight), but I don't it would be significant enough to affect monthly counts.
+```{r sessionInfo}
+sessionInfo()
+```
