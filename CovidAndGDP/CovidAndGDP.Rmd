@@ -1,0 +1,150 @@
+---
+title: "COVID and GDP"
+author: "casey durfee"
+date: "1/18/2022"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(rvest)
+```
+
+## Description
+
+I decided to look at how COVID fatalities correlate with income in the United States.
+
+I obtained county-level COVID data from Johns Hopkins University and the county-level 
+per capita income data from Wikipedia.
+
+For COVID, I am using the total death counts as of 12/31/2021.
+
+The income data is from the 2009–2013 American Community Survey 5-Year Estimates.
+```{r get_data}
+covid_url <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_deaths_US.csv"
+
+deaths_by_county <- read_csv(covid_url, show_col_types = FALSE) %>%
+      mutate(CountyState = paste(Admin2, Province_State, sep = ', ')) %>%
+      rename("Deaths" = "12/31/21") %>%
+      select(CountyState, Deaths) 
+
+gdp_table <- read_html("https://en.wikipedia.org/wiki/List_of_United_States_counties_by_per_capita_income") %>%
+        html_element(xpath = "//table[3]") %>%
+        html_table()
+
+colnames(gdp_table) <- c("Rank", "County", "State",
+        "PerCapitaIncome", "MedianHousehold", "MedianFamily", "Population", "NumHouseholds")
+
+gdp_table <- gdp_table %>%
+              filter(Rank != "—") %>%
+              mutate(CountyState = paste(str_trim(County), State, sep = ', '),
+                    PerCapitaIncome = parse_number(PerCapitaIncome),
+                    MedianHousehold = parse_number(MedianHousehold),
+                    MedianFamily = parse_number(MedianFamily),
+                    Population = parse_number(Population),
+                    NumHouseholds = parse_number(NumHouseholds),
+                    Rank = parse_number(Rank)
+              )
+```
+
+We'll merge the two data samples together, and calculate the per-capita
+fatality rate for COVID using the population counts from Wikipedia.
+
+```{r merge}
+
+merged <- left_join(deaths_by_county, gdp_table, by = c("CountyState" = "CountyState")) %>%
+        mutate(PerCapitaDeaths = Deaths / Population) %>% 
+        filter(!is.na(PerCapitaIncome))
+
+cor(merged$PerCapitaDeaths, merged$PerCapitaIncome)
+cor(merged$PerCapitaDeaths, merged$MedianHousehold)
+cor(merged$PerCapitaDeaths, merged$MedianFamily)
+```
+All of the income measures are correlated with per-capita deaths, with median family 
+income being the strongest predictor.
+
+```{r linearmodel}
+l <- lm(merged$PerCapitaDeaths ~ merged$MedianFamily)
+
+summary(l)
+
+plot(merged$MedianFamily, merged$PerCapitaDeaths,
+     xlab="Median Family Income",
+     ylab="Per Capita Deaths from COVID") + abline(l, col='red') 
+```
+
+
+## Missing Data
+There are many data points reporting zero COVID
+deaths. It turns out some of those counties are fairly large:
+
+```{r zerocovid}
+zero_deaths <- merged %>% filter(PerCapitaDeaths == 0)
+
+zd <- zero_deaths[order(zero_deaths$Population, decreasing = TRUE), ]
+
+head(zd)
+```
+
+It's highly unlikely that Weber County, with a population of 233,871, has had
+zero COVID fatalities. Currently about 3/1000 Americans have died of COVID, so
+we would expect about 700 COVID deaths in Weber County.
+
+In total, there are about 700,000 people living in counties with zero reported 
+fatalities in the Johns Hopkins data.  Utah is the worst offender.
+
+```{r discrepancies}
+sum(zd$Population)
+
+by_state <- zd %>% group_by(State) %>% summarize(total = sum(Population))
+
+by_state[order(by_state$total, decreasing = TRUE), ]
+```
+
+So, it's worth redoing the fit without the 0 fatality counties, even though 
+there probably are some small counties that actually don't have any fatalities.
+
+```{r}
+without_zero_deaths <- merged %>%
+                filter(PerCapitaDeaths != 0) 
+
+l <- lm(without_zero_deaths$PerCapitaDeaths ~ without_zero_deaths$MedianFamily)
+
+summary(l)
+
+plot(without_zero_deaths$MedianFamily,
+     without_zero_deaths$PerCapitaDeaths,
+     xlab="Median Family Income",
+     ylab="Per Capita Deaths from COVID") + abline(l, col='red')
+```
+
+The fit is only slightly better, with the R-squared value going from .19 to .20.
+
+## Bias/Conclusion
+There appears to be a correlation between income and COVID 
+fatality rate, although the COVID data is incomplete from some
+counties, particularly in the state of Utah.
+
+I don't think I did anything biased in my analysis, but I did get the result 
+I was expecting -- that richer counties would have a lower COVID fatality rate 
+than poorer counties. 
+
+There may also be other biases in the data -- over or under-reporting of COVID deaths, 
+for instance. Additionally, the per capita income data is based on estimates from 
+2013, which isn't ideal.
+
+I think the next step would be to compare counties within states, and compare states
+with similar states, in order to control for other factors and focus specifically on 
+income.
+
+In Colorado, for instance, do poorer counties have a higher COVID
+fatality rate than richer counties? And how well does the state-level GDP predict 
+COVID fatality rate? That would probably give more insight to the link between GDP
+and COVID rather than comparing every county in the US with each other.
+
+```{r sessionInfo}
+sessionInfo()
+```
